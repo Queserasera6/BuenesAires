@@ -6,19 +6,17 @@ import pandas as pd
 import numpy as np
 from sklearn.pipeline import make_pipeline
 from sklearn.linear_model import Ridge
-# We use the standard sklearn OneHotEncoder for simplicity in deployment
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.compose import ColumnTransformer
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error, r2_score
 
-# --- 1. REAL MODEL TRAINING (ON STARTUP) ---
-# Since we can't upload the huge CSV, we generate realistic synthetic data
-# and train a REAL Ridge Regression model on the fly.
-
-def train_real_model():
+# --- 1. REAL MODEL TRAINING & METRICS ---
+def train_and_evaluate():
     np.random.seed(42)
-    n_samples = 500
+    n_samples = 1000  # Increased sample size for better stats
     
-    # Generate random features
+    # Generate Synthetic Data
     areas = np.random.randint(30, 200, n_samples)
     lats = np.random.uniform(-34.65, -34.55, n_samples)
     lons = np.random.uniform(-58.50, -58.35, n_samples)
@@ -27,22 +25,15 @@ def train_real_model():
         n_samples
     )
     
-    # Create DataFrame
-    df_train = pd.DataFrame({
+    df = pd.DataFrame({
         'surface_covered_in_m2': areas,
         'lat': lats,
         'lon': lons,
         'neighborhood': neighborhoods
     })
     
-    # Define "True" weights for the target variable (Price)
-    # This ensures our model actually learns relationships that make sense
+    # Generate Target (Price) with some logic + noise
     base_price = 10000
-    
-    # pricing logic: 
-    # - Area adds value ($2000/m2)
-    # - Latitude: moving North (increasing lat) in BA is generally pricier
-    # - Neighborhood premiums
     hood_premiums = {
         'Puerto Madero': 100000, 'Palermo': 50000, 'Recoleta': 45000,
         'Belgrano': 40000, 'San Telmo': 20000, 'Caballito': 25000, 'Boca': 5000
@@ -50,21 +41,18 @@ def train_real_model():
     
     prices = []
     for i in range(n_samples):
-        p = base_price + (df_train.iloc[i]['surface_covered_in_m2'] * 2000)
-        p += hood_premiums[df_train.iloc[i]['neighborhood']]
-        # Add Lat/Lon effect (Simplified: Closer to specific point = more expensive)
-        # Just adding noise and lat effect for the regression to find
-        p += (df_train.iloc[i]['lat'] * 10000) 
-        # Add random noise
-        p += np.random.normal(0, 5000)
+        p = base_price + (df.iloc[i]['surface_covered_in_m2'] * 2000)
+        p += hood_premiums[df.iloc[i]['neighborhood']]
+        p += (df.iloc[i]['lat'] * 10000) 
+        p += np.random.normal(0, 5000) # Noise
         prices.append(p)
         
-    y_train = np.array(prices)
+    y = np.array(prices)
     
-    # --- BUILD PIPELINE ---
-    # We use ColumnTransformer to OneHotEncode ONLY the neighborhood
-    # and pass the numericals (area, lat, lon) through.
+    # Split Data (80% Train, 20% Test)
+    X_train, X_test, y_train, y_test = train_test_split(df, y, test_size=0.2, random_state=42)
     
+    # Build Pipeline
     categorical_features = ['neighborhood']
     numerical_features = ['surface_covered_in_m2', 'lat', 'lon']
     
@@ -75,17 +63,18 @@ def train_real_model():
         ]
     )
     
-    model = make_pipeline(
-        preprocessor,
-        Ridge(alpha=1.0)
-    )
+    model = make_pipeline(preprocessor, Ridge(alpha=1.0))
+    model.fit(X_train, y_train)
     
-    # Train the model
-    model.fit(df_train, y_train)
-    return model
+    # Calculate Metrics
+    y_pred = model.predict(X_test)
+    mae = mean_absolute_error(y_test, y_pred)
+    r2 = r2_score(y_test, y_pred)
+    
+    return model, mae, r2
 
-# Train the model once when app starts
-model = train_real_model()
+# Train model and get metrics
+model, mae, r2 = train_and_evaluate()
 
 # --- 2. DASH APP SETUP ---
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.LUX])
@@ -97,15 +86,26 @@ app.layout = dbc.Container([
         dbc.Col(html.H1("Buenos Aires Real Estate Predictor", className="text-center text-primary mb-4"), width=12)
     ], className="mt-5"),
 
+    # --- NEW: METRICS CARD ---
     dbc.Row([
-        # Left Column: Inputs
+        dbc.Col([
+            dbc.Alert([
+                html.H5("Model Performance (Test Set)", className="alert-heading"),
+                html.P(f"R² Score: {r2:.2f} (Explains {r2*100:.0f}% of variance)"),
+                html.P(f"Mean Absolute Error (MAE): ${mae:,.2f}"),
+                html.Hr(),
+                html.P("These metrics are calculated live on unseen test data during deployment.", className="mb-0 small")
+            ], color="info")
+        ], width=12, md=12)
+    ], className="mb-4"),
+
+    dbc.Row([
+        # Inputs
         dbc.Col([
             dbc.Card([
                 dbc.CardHeader("Property Parameters", className="fw-bold bg-primary text-white"),
                 dbc.CardBody([
-                    
-                    # Neighborhood
-                    html.Label("Neighborhood", className="fw-bold"),
+                    html.Label("Neighborhood"),
                     dcc.Dropdown(
                         id='neighborhood-input',
                         options=[
@@ -117,79 +117,50 @@ app.layout = dbc.Container([
                             {'label': 'Caballito', 'value': 'Caballito'},
                             {'label': 'Boca', 'value': 'Boca'},
                         ],
-                        value='Palermo',
-                        className="mb-3"
+                        value='Palermo', className="mb-3"
                     ),
-
-                    # Area
-                    html.Label("Surface Area (m²)", className="fw-bold"),
+                    html.Label("Surface Area (m²)"),
                     dcc.Slider(
-                        id='area-input',
-                        min=30, max=200, step=5, value=60,
+                        id='area-input', min=30, max=200, step=5, value=60,
                         marks={i: f'{i}' for i in range(30, 201, 40)},
-                        tooltip={"placement": "bottom", "always_visible": True},
                         className="mb-4"
                     ),
-
-                    # Latitude
-                    html.Label("Latitude (-34.55 to -34.70)", className="fw-bold"),
-                    dbc.Input(
-                        id='lat-input', type='number', 
-                        value=-34.58, step=0.001, 
-                        className="mb-3"
-                    ),
-
-                    # Longitude
-                    html.Label("Longitude (-58.35 to -58.55)", className="fw-bold"),
-                    dbc.Input(
-                        id='lon-input', type='number', 
-                        value=-58.40, step=0.001, 
-                        className="mb-3"
-                    ),
+                    html.Label("Latitude"),
+                    dbc.Input(id='lat-input', type='number', value=-34.58, step=0.001, className="mb-3"),
+                    html.Label("Longitude"),
+                    dbc.Input(id='lon-input', type='number', value=-58.40, step=0.001, className="mb-3"),
                 ])
             ], className="shadow")
         ], width=12, md=4),
 
-        # Right Column: Prediction & Info
+        # Prediction
         dbc.Col([
             dbc.Card([
                 dbc.CardBody([
-                    html.H4("Predicted Market Value", className="text-center text-muted mb-4"),
+                    html.H4("Predicted Value", className="text-center text-muted mb-4"),
                     html.Div(id='prediction-output', className="display-4 text-center text-success fw-bold"),
-                    html.Hr(),
-                    html.P([
-                        "Model: ", html.Span("Ridge Regression (L2 Regularization)", className="fw-bold")
-                    ], className="text-center"),
-                    html.P([
-                        "Pipeline: ", html.Span("OneHotEncoder + Numerical Passthrough", className="fw-bold")
-                    ], className="text-center"),
                 ])
             ], className="shadow h-100")
         ], width=12, md=8)
     ])
 ], fluid=True)
 
-# --- 4. CALLBACK ---
 @app.callback(
     Output('prediction-output', 'children'),
-    [Input('area-input', 'value'),
-     Input('neighborhood-input', 'value'),
-     Input('lat-input', 'value'),
-     Input('lon-input', 'value')]
+    [Input('area-input', 'value'), Input('neighborhood-input', 'value'),
+     Input('lat-input', 'value'), Input('lon-input', 'value')]
 )
 def update_prediction(area, neighborhood, lat, lon):
-    # Construct input dataframe exactly as the model expects
     input_df = pd.DataFrame({
         'surface_covered_in_m2': [float(area)],
         'lat': [float(lat)],
         'lon': [float(lon)],
         'neighborhood': [neighborhood]
     })
-    
     try:
         pred = model.predict(input_df)[0]
         return f"${pred:,.2f}"
-    except Exception as e:
+    except:
         return "Check Inputs"
 
 if __name__ == '__main__':
