@@ -126,9 +126,9 @@ app.layout = dbc.Container([
                         className="mb-4"
                     ),
                     html.Label("Latitude"),
-                    dbc.Input(id='lat-input', type='number', value=-34.58, step=0.001, className="mb-3"),
+                    dbc.Input(id='lat-input', type='number', value=34.58, step=0.001, className="mb-3"),
                     html.Label("Longitude"),
-                    dbc.Input(id='lon-input', type='number', value=-58.40, step=0.001, className="mb-3"),
+                    dbc.Input(id='lon-input', type='number', value=58.40, step=0.001, className="mb-3"),
                 ])
             ], className="shadow")
         ], width=12, md=4),
